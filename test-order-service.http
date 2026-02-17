@@ -1,7 +1,7 @@
 # Test the order-service
 
 ### Place an order
-POST http://localhost:3000/orders
+POST http://130.107.73.126:3000/orders
 Content-Type: application/json
 
 {

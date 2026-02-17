@@ -1,56 +1,75 @@
 // Import required modules
-const express = require('express'); // Express is a minimal Node.js framework for building web applications.
-const amqp = require('amqplib/callback_api'); // AMQP (Advanced Message Queuing Protocol) client library for RabbitMQ.
-const cors = require('cors'); // CORS (Cross-Origin Resource Sharing) middleware for handling cross-origin requests.
-require('dotenv').config(); // Load environment variables from .env file in development
+const express = require('express');          // Express for building web APIs
+const amqp = require('amqplib/callback_api');// AMQP client for RabbitMQ
+const cors = require('cors');                // CORS for cross-origin requests
+require('dotenv').config();                  // Load env vars from .env (dev only)
 
-const app = express(); // Create an Express application instance.
-app.use(express.json()); // Middleware to parse incoming JSON request bodies.
+const app = express();
+app.use(express.json());
 
-// Enable CORS (Cross-Origin Resource Sharing) for all routes
+// Enable CORS (allow all for lab/demo; tighten later if needed)
 app.use(cors());
 
-// Get the RabbitMQ URL and the port from environment variables
-const RABBITMQ_CONNECTION_STRING = process.env.RABBITMQ_CONNECTION_STRING || 'amqp://localhost';  // Fallback to localhost if not defined
-const PORT = process.env.PORT || 3000;  // Fallback to port 3000 if not defined
+// Config from environment variables
+const RABBITMQ_CONNECTION_STRING =
+  process.env.RABBITMQ_CONNECTION_STRING || 'amqp://localhost';
+const PORT = process.env.PORT || 3000;
 
-// Define a POST route for creating orders
+// Simple health check (useful for external reachability tests)
+app.get('/health', (req, res) => {
+  res.json({ ok: true, port: PORT });
+});
+
+// POST /orders — publish order messages to RabbitMQ
 app.post('/orders', (req, res) => {
-  const order = req.body; // Extract the order data from the request body.
-  
-  // Connect to RabbitMQ server
-  amqp.connect(RABBITMQ_CONNECTION_STRING, (err, conn) => {
-    if (err) {
-      // If an error occurs while connecting to RabbitMQ, send a 500 status and error message.
-      return res.status(500).send('Error connecting to RabbitMQ');
+  const order = req.body;
+
+  if (!order || Object.keys(order).length === 0) {
+    return res.status(400).json({ error: 'Order body is required' });
+  }
+
+  // Connect to RabbitMQ
+  amqp.connect(RABBITMQ_CONNECTION_STRING, (connErr, conn) => {
+    if (connErr) {
+      console.error('RabbitMQ connection error:', connErr.message);
+      return res.status(500).json({ error: 'Error connecting to RabbitMQ' });
     }
 
-    // Once connected to RabbitMQ, create a channel to communicate with it.
-    conn.createChannel((err, channel) => {
-      if (err) {
-        // If an error occurs while creating a channel, send a 500 status and error message.
-        return res.status(500).send('Error creating channel');
+    // Create channel
+    conn.createChannel((chanErr, channel) => {
+      if (chanErr) {
+        console.error('RabbitMQ channel error:', chanErr.message);
+        try { conn.close(); } catch (e) {}
+        return res.status(500).json({ error: 'Error creating channel' });
       }
 
-      const queue = 'order_queue'; // Define the queue where the order will be sent.
-      const msg = JSON.stringify(order); // Convert the order object to a JSON string.
+      const queue = 'order_queue';
+      const msg = JSON.stringify(order);
 
-      // Assert (create) the queue if it doesn't already exist.
-      channel.assertQueue(queue, { durable: false });
+      try {
+        // Non-durable queue is OK for lab; make durable if you want persistence
+        channel.assertQueue(queue, { durable: false });
+        channel.sendToQueue(queue, Buffer.from(msg));
+        console.log('Sent order to queue:', msg);
 
-      // Send the order message to the queue.
-      channel.sendToQueue(queue, Buffer.from(msg));
+        // Clean up channel/connection shortly after publishing
+        setTimeout(() => {
+          try { channel.close(); } catch (e) {}
+          try { conn.close(); } catch (e) {}
+        }, 100);
 
-      // Log the sent order to the console.
-      console.log("Sent order to queue:", msg);
-
-      // Send a response to the client confirming that the order was received.
-      res.send('Order received');
+        return res.status(201).json({ message: 'Order received' });
+      } catch (sendErr) {
+        console.error('RabbitMQ publish error:', sendErr.message);
+        try { channel.close(); } catch (e) {}
+        try { conn.close(); } catch (e) {}
+        return res.status(500).json({ error: 'Failed to place order' });
+      }
     });
   });
 });
 
-// Start the server using the port from environment variables
-app.listen(PORT, () => {
-  console.log(`Order service is running on http://localhost:${PORT}`);
+// IMPORTANT: bind to 0.0.0.0 so it’s reachable externally
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Order service is running on http://0.0.0.0:${PORT}`);
 });
